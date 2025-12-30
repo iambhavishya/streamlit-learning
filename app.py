@@ -47,6 +47,8 @@ Constraints:
 - If user mentions time or date, use "Order Date" as x with chart_type "line" and aggregate "sum" on Sales.
 - If unsure, default to bar chart of sum of Sales by Category.
 """
+import os
+st.write("Current directory files:", os.listdir("."))
 
 # ---------- LOAD DATA ----------
 @st.cache_data
@@ -310,3 +312,4 @@ else:
 
             st.markdown(answer)
             st.session_state.chat_history.append(("assistant", answer))
+
