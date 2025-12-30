@@ -59,7 +59,7 @@ def load_data(path: str):
     return df_local
 
 
-df = load_data("sample_-_superstore.xlsx")
+df = load_data("sample_superstore.xlsx")
 
 # ---------- SIDEBAR FILTERS ----------
 st.sidebar.header("Filters")
@@ -312,4 +312,5 @@ else:
 
             st.markdown(answer)
             st.session_state.chat_history.append(("assistant", answer))
+
 
