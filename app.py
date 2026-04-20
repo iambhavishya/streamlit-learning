@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-
+import json
 import altair as alt
 import google.generativeai as genai
 import pandas as pd
@@ -20,7 +20,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    # Use the model you requested
+    # Reverted to your requested model name
     model = genai.GenerativeModel("models/gemini-2.5-flash")
 else:
     model = None
@@ -56,8 +56,12 @@ def load_data(path: str):
     df_local["Ship Date"] = pd.to_datetime(df_local["Ship Date"])
     return df_local
 
-
-df = load_data("sample_superstore.xlsx")
+# Ensure your Excel file is in the same directory
+try:
+    df = load_data("sample_superstore.xlsx")
+except Exception as e:
+    st.error(f"Excel file error: {e}")
+    st.stop()
 
 # ---------- SIDEBAR FILTERS ----------
 st.sidebar.header("Filters")
@@ -80,7 +84,7 @@ selected_segment = st.sidebar.selectbox("Segment", segments)
 
 # Apply filters
 filtered = df.copy()
-if len(date_range) == 2:
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     start, end = date_range
     filtered = filtered[
         (filtered["Order Date"] >= pd.to_datetime(start))
@@ -180,71 +184,64 @@ if create_btn and chart_query:
                 ),
             )
 
-            import json
-
             raw = resp.text.strip()
-
-            # For debugging: show raw response (you can remove this later)
-            st.write("Gemini raw output:", raw)
-
-            # If nothing returned, stop gracefully
-            if not raw:
-                raise ValueError("Gemini returned empty response for chart spec.")
-
-            # Keep only content between first { and last }
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start == -1 or end == -1:
-                raise ValueError("No JSON object found in Gemini response.")
-
-            raw_json = raw[start : end + 1]
-            spec = json.loads(raw_json)
-
-
-            chart_type = spec.get("chart_type", "bar")
-            x = spec.get("x", "Category")
-            y = spec.get("y", "Sales")
-            color = spec.get("color", None)
-            agg = spec.get("aggregate", "sum")
-
-            if x not in filtered.columns or y not in filtered.columns:
-                st.error(f"Invalid fields from model: x={x}, y={y}")
+            
+            # Clean JSON extraction
+            start_idx = raw.find("{")
+            end_idx = raw.rfind("}")
+            
+            if start_idx == -1 or end_idx == -1:
+                st.error("No valid JSON found in model response.")
             else:
-                enc = {}
+                raw_json = raw[start_idx : end_idx + 1]
+                spec = json.loads(raw_json)
 
-                # X encoding: treat dates specially
-                if pd.api.types.is_datetime64_any_dtype(filtered[x]):
-                    enc["x"] = alt.X(f"{x}:T")
-                elif filtered[x].dtype == "object":
-                    enc["x"] = alt.X(f"{x}:N")
+                chart_type = spec.get("chart_type", "bar")
+                x = spec.get("x", "Category")
+                y = spec.get("y", "Sales")
+                color = spec.get("color", None)
+                agg = spec.get("aggregate", "sum")
+
+                if x not in filtered.columns or y not in filtered.columns:
+                    st.error(f"Invalid fields from model: x={x}, y={y}")
                 else:
-                    enc["x"] = alt.X(f"{x}:Q")
+                    enc = {}
 
-                # Y encoding with aggregation
-                if agg:
-                    enc["y"] = alt.Y(f"{agg}({y}):Q", title=f"{agg.capitalize()} of {y}")
-                else:
-                    enc["y"] = alt.Y(f"{y}):Q", title=y)
+                    # X encoding
+                    if pd.api.types.is_datetime64_any_dtype(filtered[x]):
+                        enc["x"] = alt.X(f"{x}:T")
+                    elif filtered[x].dtype == "object":
+                        enc["x"] = alt.X(f"{x}:N")
+                    else:
+                        enc["x"] = alt.X(f"{x}:Q")
 
-                if color and color in filtered.columns:
-                    enc["color"] = alt.Color(f"{color}:N")
+                    # Y encoding with aggregation - FIXED SYNTAX
+                    if agg:
+                        enc["y"] = alt.Y(f"{agg}({y}):Q", title=f"{agg.capitalize()} of {y}")
+                    else:
+                        # Removed the extra parenthesis that was causing the blank chart
+                        enc["y"] = alt.Y(f"{y}:Q", title=y)
 
-                if chart_type == "line":
-                    base_chart = alt.Chart(filtered).mark_line(point=True)
-                elif chart_type == "scatter":
-                    base_chart = alt.Chart(filtered).mark_point()
-                else:
-                    base_chart = alt.Chart(filtered).mark_bar()
+                    if color and color in filtered.columns:
+                        enc["color"] = alt.Color(f"{color}:N")
 
-                dynamic_chart = (
-                    base_chart.encode(**enc)
-                    .properties(
-                        height=350,
-                        title=f"Gemini chart: {chart_query}",
+                    # Base mark selection
+                    if chart_type == "line":
+                        base_chart = alt.Chart(filtered).mark_line(point=True)
+                    elif chart_type == "scatter":
+                        base_chart = alt.Chart(filtered).mark_point()
+                    else:
+                        base_chart = alt.Chart(filtered).mark_bar()
+
+                    dynamic_chart = (
+                        base_chart.encode(**enc)
+                        .properties(
+                            height=350,
+                            title=f"Gemini chart: {chart_query}",
+                        )
                     )
-                )
 
-                st.altair_chart(dynamic_chart, use_container_width=True)
+                    st.altair_chart(dynamic_chart, use_container_width=True)
 
         except Exception as e:
             st.error(f"Could not create chart: {e}")
@@ -259,16 +256,9 @@ else:
     sample_rows = min(200, len(filtered))
     data_snippet = filtered.head(sample_rows)[
         [
-            "Order Date",
-            "Region",
-            "Segment",
-            "Category",
-            "Sub-Category",
-            "Ship Mode",
-            "Sales",
-            "Profit",
-            "Quantity",
-            "Discount",
+            "Order Date", "Region", "Segment", "Category", 
+            "Sub-Category", "Ship Mode", "Sales", "Profit", 
+            "Quantity", "Discount"
         ]
     ]
 
@@ -279,9 +269,8 @@ else:
         with st.chat_message(role):
             st.markdown(content)
 
-    user_q = st.chat_input(
-        "Ask a question, e.g. 'Which category is most profitable in this view?'"
-    )
+    user_q = st.chat_input("Ask a question, e.g. 'Which category is most profitable?'")
+    
     if user_q:
         st.session_state.chat_history.append(("user", user_q))
         with st.chat_message("user"):
@@ -297,19 +286,10 @@ else:
 
         with st.chat_message("assistant"):
             try:
-                resp = model.generate_content(
-                    system_prompt + "\nUser question: " + user_q,
-                    generation_config=genai.GenerationConfig(
-                        max_output_tokens=400,
-                        temperature=0.3,
-                    ),
-                )
+                resp = model.generate_content(system_prompt + "\nUser question: " + user_q)
                 answer = resp.text
             except Exception as e:
                 answer = f"Error from Gemini: {e}"
 
             st.markdown(answer)
             st.session_state.chat_history.append(("assistant", answer))
-
-
-
