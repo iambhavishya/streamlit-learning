@@ -20,11 +20,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+    # Using your original model name
     model = genai.GenerativeModel("models/gemini-2.5-flash")
 else:
     model = None
 
-# Updated Prompt to include Pie and Donut instructions
+# Prompt template for chart creation
 CHART_SYSTEM_PROMPT = """
 You are a data visualization assistant.
 The user will ask for a chart based on the Superstore data.
@@ -42,7 +43,8 @@ Structure:
 Constraints:
 - Valid numeric columns: "Sales", "Profit", "Quantity", "Discount".
 - Valid categorical columns: "Region", "Segment", "Category", "Sub-Category", "Ship Mode".
-- For pie/donut, 'x' is the category and 'y' is the numeric value.
+- For pie/donut, 'x' is the category (slices) and 'y' is the numeric value (size).
+- Always suggest an aggregate like 'sum' for numeric values.
 """
 
 # ---------- LOAD DATA ----------
@@ -52,7 +54,7 @@ def load_data(path: str):
     df_local["Order Date"] = pd.to_datetime(df_local["Order Date"])
     df_local["Ship Date"] = pd.to_datetime(df_local["Ship Date"])
     
-    # FORCE NUMERIC: Prevents blank charts caused by "object" types in Excel
+    # FORCE NUMERIC: Crucial to ensure Altair handles the math correctly
     numeric_cols = ["Sales", "Profit", "Quantity", "Discount"]
     for col in numeric_cols:
         df_local[col] = pd.to_numeric(df_local[col], errors='coerce').fillna(0)
@@ -90,7 +92,7 @@ k2.metric("Total Profit", f"${filtered['Profit'].sum():,.0f}")
 k3.metric("Avg Discount", f"{filtered['Discount'].mean()*100:.1f}%")
 k4.metric("Order Count", f"{filtered['Order ID'].nunique():,}")
 
-# ---------- STATIC VISUALS (ALWAYS VISIBLE) ----------
+# ---------- STATIC VISUALS ----------
 st.markdown("---")
 col_left, col_right = st.columns([2, 1])
 
@@ -116,13 +118,12 @@ with col_right:
 st.markdown("---")
 st.markdown("## 🔧 AI Custom Chart Builder")
 
-# Initialize session state to prevent charts from disappearing
 if "ai_chart_spec" not in st.session_state:
     st.session_state.ai_chart_spec = None
 if "last_query" not in st.session_state:
     st.session_state.last_query = ""
 
-chart_query = st.text_input("Describe the chart (e.g., 'Donut chart of sales by segment' or 'Pie chart of profit by region')")
+chart_query = st.text_input("Describe the chart (e.g., 'Donut chart of Profit by Region')")
 create_btn = st.button("Create AI Chart")
 
 if create_btn and chart_query:
@@ -138,7 +139,7 @@ if create_btn and chart_query:
                 st.session_state.ai_chart_spec = json.loads(raw[s : e + 1])
                 st.session_state.last_query = chart_query
             except Exception as ex:
-                st.error(f"Error: {ex}")
+                st.error(f"Error parsing Gemini response: {ex}")
 
 # Rendering logic for AI Chart
 if st.session_state.ai_chart_spec:
@@ -146,35 +147,39 @@ if st.session_state.ai_chart_spec:
     try:
         chart_type = spec.get("chart_type", "bar")
         x_raw, y_raw = spec.get("x", "Category"), spec.get("y", "Sales")
-        agg = spec.get("aggregate", "sum")
+        
+        # SAFETY: Default to sum if model returns null for aggregate
+        agg = spec.get("aggregate") if spec.get("aggregate") else "sum"
         
         # Case-insensitive column matching
         cols_map = {c.lower(): c for c in filtered.columns}
         real_x = cols_map.get(x_raw.lower(), x_raw)
         real_y = cols_map.get(y_raw.lower(), y_raw)
 
-        st.write(f"**Showing:** {st.session_state.last_query}")
+        st.info(f"**Generated:** {st.session_state.last_query}")
 
         if chart_type in ["pie", "donut"]:
-            # Pie/Donut Encoding
+            # FIX: Aggregation is now forced inside Theta to prevent 'barcode' look
             enc = {
-                "theta": alt.Theta(f"{agg}({real_y}):Q" if agg else f"{real_y}:Q"),
-                "color": alt.Color(f"{real_x}:N"),
-                "tooltip": [real_x, real_y]
+                "theta": alt.Theta(f"{agg}({real_y}):Q", title=f"{agg.capitalize()} of {real_y}"),
+                "color": alt.Color(f"{real_x}:N", title=real_x),
+                "tooltip": [real_x, alt.Tooltip(f"{agg}({real_y}):Q", format=",.0f")]
             }
             if chart_type == "donut":
-                base = alt.Chart(filtered).mark_arc(innerRadius=70)
+                base = alt.Chart(filtered).mark_arc(innerRadius=80)
             else:
                 base = alt.Chart(filtered).mark_arc()
         else:
             # Bar/Line/Scatter Encoding
             enc = {
                 "x": alt.X(f"{real_x}:T") if "Date" in real_x else alt.X(f"{real_x}:N", sort='-y'),
-                "y": alt.Y(f"{agg}({real_y}):Q") if agg else alt.Y(f"{real_y}:Q"),
-                "tooltip": [real_x, real_y]
+                "y": alt.Y(f"{agg}({real_y}):Q", title=f"{agg.capitalize()} of {real_y}"),
+                "tooltip": [real_x, alt.Tooltip(f"{agg}({real_y}):Q", format=",.0f")]
             }
-            if spec.get("color") and spec.get("color").lower() in cols_map:
-                enc["color"] = alt.Color(f"{cols_map[spec['color'].lower()]}:N")
+            
+            color_req = spec.get("color")
+            if color_req and color_req.lower() in cols_map:
+                enc["color"] = alt.Color(f"{cols_map[color_req.lower()]}:N")
 
             if chart_type == "line":
                 base = alt.Chart(filtered).mark_line(point=True)
@@ -183,13 +188,14 @@ if st.session_state.ai_chart_spec:
             else:
                 base = alt.Chart(filtered).mark_bar()
 
-        st.altair_chart(base.encode(**enc).properties(height=450), use_container_width=True)
+        st.altair_chart(base.encode(**enc).properties(height=500), use_container_width=True)
+        
     except Exception as render_err:
-        st.error(f"Could not render AI chart: {render_err}")
+        st.error(f"Render Error: {render_err}. Please try a different prompt.")
 
 # ---------- CHAT SECTION ----------
 st.markdown("---")
-st.subheader("Chat about this view")
+st.subheader("Chat about the Dashboard")
 
 if GEMINI_API_KEY and model:
     if "chat_history" not in st.session_state:
@@ -199,14 +205,14 @@ if GEMINI_API_KEY and model:
         with st.chat_message(role):
             st.markdown(content)
 
-    user_q = st.chat_input("Ask a question about the data...")
+    user_q = st.chat_input("Ask a question...")
     if user_q:
         st.session_state.chat_history.append(("user", user_q))
         with st.chat_message("user"):
             st.markdown(user_q)
 
-        data_snippet = filtered.head(100).to_csv(index=False)
-        sys_chat_prompt = f"Data context (first 100 rows):\n{data_snippet}\n\nUser Question: {user_q}"
+        data_summary = filtered.groupby('Category')[['Sales', 'Profit']].sum().to_csv()
+        sys_chat_prompt = f"Data Summary:\n{data_summary}\n\nUser Question: {user_q}"
         
         with st.chat_message("assistant"):
             try:
